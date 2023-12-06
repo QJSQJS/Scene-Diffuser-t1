@@ -7,6 +7,38 @@ from einops import repeat, rearrange
 from inspect import isfunction
 
 
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=1):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+           
+        self.fc = nn.Sequential(nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),
+                               nn.ReLU(),
+                               nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False))
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+
+        self.conv1 = nn.Conv2d(4, 1, kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
     """
     Create sinusoidal timestep embeddings.
@@ -51,6 +83,9 @@ class ResBlock(nn.Module):
         self.dropout = dropout
         self.out_channels = in_channels if out_channels is None else out_channels
 
+        self.ca = ChannelAttention(4)
+        self.sa = SpatialAttention()
+
         self.in_layers = nn.Sequential(
             nn.GroupNorm(32, self.in_channels),
             nn.SiLU(),
@@ -81,7 +116,12 @@ class ResBlock(nn.Module):
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
+#######################CBAM############################
         h = self.in_layers(x)
+        # h = self.ca(h) * h
+        #print(h.size())
+        #print(self.sa(h).size())
+        #h = self.sa(h).view(1,-1) * h
         emb_out = self.emb_layers(emb)
         h = h + emb_out.unsqueeze(-1)
         h = self.out_layers(h)
@@ -159,28 +199,81 @@ class LinearAttention(nn.Module):
         out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.heads, h=h, w=w)
         return self.to_out(out)
 
+# class SpatialSelfAttention(nn.Module):
+#     def __init__(self, in_channels):
+#         super().__init__()
+#         self.in_channels = in_channels
+#
+#         self.norm = Normalize(in_channels)
+#         self.q = torch.nn.Conv2d(in_channels,
+#                                  in_channels,
+#                                  kernel_size=1,
+#                                  stride=1,
+#                                  padding=0)
+#         self.k = torch.nn.Conv2d(in_channels,
+#                                  in_channels,
+#                                  kernel_size=1,
+#                                  stride=1,
+#                                  padding=0)
+#         self.v = torch.nn.Conv2d(in_channels,
+#                                  in_channels,
+#                                  kernel_size=1,
+#                                  stride=1,
+#                                  padding=0)
+#         self.proj_out = torch.nn.Conv2d(in_channels,
+#                                         in_channels,
+#                                         kernel_size=1,
+#                                         stride=1,
+#                                         padding=0)
+#
+#     def forward(self, x):
+#         h_ = x
+#         h_ = self.norm(h_)
+#         q = self.q(h_)
+#         k = self.k(h_)
+#         v = self.v(h_)
+#
+#         # compute attention
+#         b,c,h,w = q.shape
+#         q = rearrange(q, 'b c h w -> b (h w) c')
+#         k = rearrange(k, 'b c h w -> b c (h w)')
+#         w_ = torch.einsum('bij,bjk->bik', q, k)
+#
+#         w_ = w_ * (int(c)**(-0.5))
+#         w_ = torch.nn.functional.softmax(w_, dim=2)
+#
+#         # attend to values
+#         v = rearrange(v, 'b c h w -> b c (h w)')
+#         w_ = rearrange(w_, 'b i j -> b j i')
+#         h_ = torch.einsum('bij,bjk->bik', v, w_)
+#         h_ = rearrange(h_, 'b c (h w) -> b c h w', h=h)
+#         h_ = self.proj_out(h_)
+#
+#         return x+h_
+
+
 class SpatialSelfAttention(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
 
         self.norm = Normalize(in_channels)
-        self.q = torch.nn.Conv2d(in_channels,
+        self.q = torch.nn.DeformConv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
                                  stride=1,
                                  padding=0)
-        self.k = torch.nn.Conv2d(in_channels,
+        self.k = torch.nn.DeformConv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
                                  stride=1,
                                  padding=0)
-        self.v = torch.nn.Conv2d(in_channels,
+        self.v = torch.nn.DeformConv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
                                  stride=1,
                                  padding=0)
-        self.proj_out = torch.nn.Conv2d(in_channels,
+        self.proj_out = torch.nn.DeformConv2d(in_channels,
                                         in_channels,
                                         kernel_size=1,
                                         stride=1,
@@ -318,8 +411,8 @@ class SpatialTransformer(nn.Module):
 
 if __name__ == '__main__':
     st = SpatialTransformer(256, 8, 64, 6, context_dim=768)
-    print(st)
+    #print(st)
     a = torch.rand(2, 256, 10)
     context = torch.rand(2, 5, 768)
     o = st(a, context=context)
-    print(o.shape)
+    #print(o.shape)
